@@ -1,0 +1,441 @@
+<html>
+<meta charset="utf-8">
+	<head >
+	    <meta name="viewport" content="user-scalable=0" />
+		<title>3DS file viewer in WebGL</title>
+
+		<script type="text/javascript" src="js/glMatrix-0.9.5.min.js"></script>
+        <script type="text/javascript" src="js/3dsloaderMini.js"></script>
+		
+		<script id="shader-vs2" type="x-shader/x-vertex">
+			attribute vec3 aVertexPosition; 
+            attribute vec3 aVertexNormal; 
+            
+			uniform mat4 uMVMatrix;
+			uniform mat3 uNMatrix;
+			uniform mat4 uPMatrix;
+			varying vec3 ESNormal;
+			varying vec3 ESPos;
+			
+			void main(void) { 
+			    ESNormal = uNMatrix*aVertexNormal;
+			    ESPos    = (uMVMatrix*vec4(aVertexPosition,1)).xyz;
+		        gl_Position = uPMatrix * vec4(ESPos, 1.0);
+		    }
+		</script>
+		<script id="shader-fs2" type="x-shader/x-fragment">
+			precision mediump float; 
+			varying vec3 ESNormal;
+			varying vec3 ESPos; 
+			const vec3 lightPos = vec3(0,0,0);
+			const vec4 diffuseColor = vec4(0.25,0.25,0.25,1);
+			
+		    void main(void) {
+		        vec3 L = normalize(lightPos-ESPos);   
+		        vec3 N = normalize(ESNormal); 
+		        
+		        float diffuse = max(0.0, dot(N,L));
+		        //gl_FragColor =  vec4(N,1); 
+		        gl_FragColor =  diffuse*diffuseColor; 
+		        //gl_FragColor =  vec4(outPosition,1);
+		    }
+		</script>
+		
+
+		
+
+		<script id="shader-vs" type="x-shader/x-vertex">
+			attribute vec3 aVertexPosition;
+			uniform mat4 uMVMatrix;
+			uniform mat4 uPMatrix;
+			void main(void) {
+		        gl_Position = uPMatrix * uMVMatrix * vec4(aVertexPosition, 1.0);
+		    }
+		</script>
+        <script id="shader-fs" type="x-shader/x-fragment">
+			precision mediump float;
+		    
+		    void main(void) {
+		        gl_FragColor = vec4(0.5,0.5,0.5,0.5);
+		    }
+		</script>
+		
+		<script type="text/javascript">
+		    var gl;
+		    var oldX, oldY, rX, rY, dist, state, D2R;
+			var gridVBO;
+			var gridIBO;
+
+			var posVBO;
+			var uvVBO;
+			var indicesBO;
+
+			var shaderProgram;
+			var shaderProgram2;
+            
+            var meshes = [];
+			var modelLoaded = false;
+			var byteArray = [];
+
+            var filename = 'media/spaceship.3DS';
+			function handleLoadedTexture(texture) {
+			    gl.activeTexture(gl.TEXTURE0);
+			    gl.bindTexture(gl.TEXTURE_2D, texture);
+			    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+			    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+			    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+			    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, texture.image);
+ 			    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+			    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+
+			}
+
+            function initTexture(path) {
+                for (var i = 0; i < textureMaps.length; i++) {
+                    var glTexID = gl.createTexture();
+                    glTexID.image = new Image();
+                    glTexID.image.onload = function() {
+                        console.log("Texture loaded");
+                        try {
+                            handleLoadedTexture(glTexID);
+                        } catch (e) {
+                            console.log("Security exception: Are you loading the textures from a web server?<br>Details: " + e);
+                        }
+                        //  drawScene();
+                    }
+                    console.log("Texture name: "+path.concat(textureMaps[i]));
+
+                    glTexID.image.src = path.concat(textureMaps[i]);
+                }
+            }
+
+
+
+			function initGL(canvas) {
+				try {
+		            gl = canvas.getContext("experimental-webgl");
+		            gl.viewportWidth = canvas.width;
+		            gl.viewportHeight = canvas.height;
+		        } catch (e) {}
+
+				if (!gl) {
+					alert("Could not initialise WebGL, sorry :-(");
+				}
+			}
+
+			function getShader(gl, id) {
+				var shaderScript = document.getElementById(id);
+				if (!shaderScript) {
+					return null;
+			}
+
+			var str = "";
+			var k = shaderScript.firstChild;
+			while (k) {
+				if (k.nodeType == 3) {
+					str += k.textContent;
+				}
+				k = k.nextSibling;
+			}
+
+			var shader;
+			if (shaderScript.type == "x-shader/x-fragment") {
+				shader = gl.createShader(gl.FRAGMENT_SHADER);
+			} else if (shaderScript.type == "x-shader/x-vertex") {
+				shader = gl.createShader(gl.VERTEX_SHADER);
+			} else {
+				return null;
+			}
+
+			gl.shaderSource(shader, str);
+			gl.compileShader(shader);
+
+			if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+				alert(gl.getShaderInfoLog(shader));
+				return null;
+			}
+
+			return shader;
+		}
+
+			function initShaders() {
+				var fragmentShader = getShader(gl, "shader-fs2");
+				var vertexShader = getShader(gl, "shader-vs2");
+
+				shaderProgram2 = gl.createProgram();
+				gl.attachShader(shaderProgram2, vertexShader);
+				gl.attachShader(shaderProgram2, fragmentShader);
+				gl.linkProgram(shaderProgram2);
+
+				if (!gl.getProgramParameter(shaderProgram2, gl.LINK_STATUS)) {
+					alert("Could not initialise shaders");
+				}
+
+				gl.useProgram(shaderProgram2);
+				gl.enableVertexAttribArray(shaderProgram2.vertexPositionAttribute);
+				shaderProgram2.vertexPositionAttribute = gl.getAttribLocation(shaderProgram2, "aVertexPosition");
+				shaderProgram2.vertexNormalAttribute = gl.getAttribLocation(shaderProgram2, "aVertexNormal");
+      			shaderProgram2.pMatrixUniform = gl.getUniformLocation(shaderProgram2, "uPMatrix");
+				shaderProgram2.mvMatrixUniform = gl.getUniformLocation(shaderProgram2, "uMVMatrix");
+				shaderProgram2.nMatrixUniform = gl.getUniformLocation(shaderProgram2, "uNMatrix");
+ 
+
+				fragmentShader = getShader(gl, "shader-fs");
+				vertexShader = getShader(gl, "shader-vs");
+
+				shaderProgram = gl.createProgram();
+				gl.attachShader(shaderProgram, vertexShader);
+				gl.attachShader(shaderProgram, fragmentShader);
+				gl.linkProgram(shaderProgram);
+
+				if (!gl.getProgramParameter(shaderProgram, gl.LINK_STATUS)) {
+					alert("Could not initialise shaders");
+				}
+
+				gl.useProgram(shaderProgram);
+				gl.enableVertexAttribArray(shaderProgram.vertexPositionAttribute);
+				shaderProgram.vertexPositionAttribute = gl.getAttribLocation(shaderProgram, "aVertexPosition");
+
+				shaderProgram.vColorUniform = gl.getUniformLocation(shaderProgram, "vColor");
+				shaderProgram.pMatrixUniform = gl.getUniformLocation(shaderProgram, "uPMatrix");
+				shaderProgram.mvMatrixUniform = gl.getUniformLocation(shaderProgram, "uMVMatrix");
+			}
+
+			var mvMatrix = mat4.create();
+			var pMatrix = mat4.create();
+            var nMatrix = [];
+            
+			function setMatrixUniforms(whichShaderProgram) {
+				gl.uniformMatrix4fv(whichShaderProgram.pMatrixUniform, false, pMatrix);
+				gl.uniformMatrix4fv(whichShaderProgram.mvMatrixUniform, false, mvMatrix); 
+			}
+
+
+			function getPath(str) {
+			    return str.substring(0, str.lastIndexOf("/")+1);
+			}
+
+			function loadModel() {
+			    log = document.getElementById("log");
+
+			    //bytArray = getBinary('media/spaceship.3DS');
+				load3DS();
+				//console.log("Path: " + getPath(filename));
+
+              ///  initTexture(getPath(filename));
+
+				//generate GPU buffers for 3ds file
+				for(var i=0;i<meshes.length;i++) {
+				    meshes[i].posVBO = gl.createBuffer();
+				    meshes[i].normalVBO = gl.createBuffer();
+				 //   meshes[i].uvVBO  = gl.createBuffer();
+				    meshes[i].indicesBO = gl.createBuffer();
+
+				    //fill in GPU buffers for the 3ds file
+				    gl.bindBuffer(gl.ARRAY_BUFFER, meshes[i].posVBO);
+				    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(meshes[i].vertices), gl.STATIC_DRAW);
+				    meshes[i].posVBO.itemSize = 3;
+				    meshes[i].posVBO.numItems = meshes[i].vertices.length/3;
+				    
+				     
+				    //normals
+				    gl.bindBuffer(gl.ARRAY_BUFFER, meshes[i].normalVBO);
+				    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(meshes[i].normals), gl.STATIC_DRAW);
+				    meshes[i].normalVBO.itemSize = 3;
+				    meshes[i].normalVBO.numItems = meshes[i].normals.length/3;
+				    
+/*
+				    gl.bindBuffer(gl.ARRAY_BUFFER, meshes[i].uvVBO);
+				    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(meshes[i].uvs), gl.STATIC_DRAW);
+				    meshes[i].uvVBO.itemSize = 2;
+				    meshes[i].uvVBO.numItems = meshes[i].uvs.length/2;
+*/
+				    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, meshes[i].indicesBO);
+				    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(meshes[i].indices), gl.STATIC_DRAW);
+				    meshes[i].indicesBO.numItems = meshes[i].indices.length;
+				}
+				modelLoaded = true;
+			}
+
+			function initBuffers() {
+				//fill in the grid buffer objects
+				gridVBO = gl.createBuffer();
+				gridIBO = gl.createBuffer();
+
+				var GRID_SIZE = 10;
+				var grid_vertices=[];
+				var grid_indices=[];
+
+				//fill in grid vertices
+				for(var i=-GRID_SIZE;i<=GRID_SIZE;i++)
+				{
+					grid_vertices.push(i);
+					grid_vertices.push(0);
+					grid_vertices.push(-GRID_SIZE);
+
+					grid_vertices.push(i);
+					grid_vertices.push(0);
+					grid_vertices.push(GRID_SIZE);
+
+					grid_vertices.push(-GRID_SIZE);
+					grid_vertices.push(0);
+					grid_vertices.push(i);
+
+					grid_vertices.push(GRID_SIZE);
+					grid_vertices.push(0);
+					grid_vertices.push(i);
+				}
+
+				for(var i=0;i<GRID_SIZE*GRID_SIZE;i++) {
+					grid_indices.push(i);
+				}
+
+				gl.bindBuffer(gl.ARRAY_BUFFER, gridVBO);
+				gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(grid_vertices), gl.STATIC_DRAW);
+				gridVBO.itemSize = 3;
+				gridVBO.numItems = grid_vertices.length/3;
+
+				gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, gridIBO);
+				gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(grid_indices), gl.STATIC_DRAW);
+			}
+
+			function drawScene() {
+				gl.viewport(0, 0, gl.viewportWidth, gl.viewportHeight);
+				gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+				mat4.identity(mvMatrix);
+
+				mat4.translate(mvMatrix, [0, 0, dist]);
+				mat4.rotate(mvMatrix, rX*D2R, [1,0,0]);
+				mat4.rotate(mvMatrix, rY * D2R, [0, 0, 1]);
+                mat4.toInverseMat3(mvMatrix, nMatrix)
+                
+				//draw 3DS file
+				if(modelLoaded) {
+				    gl.useProgram(shaderProgram2)
+				    setMatrixUniforms(shaderProgram2);
+				    gl.uniformMatrix3fv(shaderProgram2.nMatrixUniform, false, nMatrix);
+					for(var i=0;i<  meshes.length ;i++) {
+					    gl.bindBuffer(gl.ARRAY_BUFFER, meshes[i].posVBO);
+					    gl.enableVertexAttribArray(shaderProgram2.vertexPositionAttribute);
+					    gl.vertexAttribPointer(shaderProgram2.vertexPositionAttribute, meshes[i].posVBO.itemSize, gl.FLOAT, false, 0, 0);
+                       
+                        gl.bindBuffer(gl.ARRAY_BUFFER, meshes[i].normalVBO);
+                        gl.enableVertexAttribArray(shaderProgram2.vertexNormalAttribute);
+					    gl.vertexAttribPointer(shaderProgram2.vertexNormalAttribute, meshes[i].normalVBO.itemSize, gl.FLOAT, false, 0, 0);
+					    
+			    		//gl.drawArrays(gl.POINTS, 0,  meshes[i].posVBO.numItems);
+				    	gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, meshes[i].indicesBO);
+					    gl.drawElements(gl.TRIANGLES, meshes[i].indicesBO.numItems, gl.UNSIGNED_SHORT, 0);
+					}
+				}
+				gl.useProgram(shaderProgram);
+				setMatrixUniforms(shaderProgram);
+				//draw grid
+				gl.bindBuffer(gl.ARRAY_BUFFER, gridVBO);
+				gl.vertexAttribPointer(shaderProgram.vertexPositionAttribute, gridVBO.itemSize, gl.FLOAT, false, 0, 0);
+				gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, gridIBO);
+
+				gl.uniform4fv(shaderProgram.vColorUniform, [0.5,0.5,0.5,1]);
+				gl.drawElements(gl.LINES, gridVBO.numItems, gl.UNSIGNED_SHORT, 0);
+			}
+
+			function onMouseDown( event ) {
+				event.preventDefault();
+
+				//0 left mouse button
+				//1 middle mouse button
+				//2 right mouse button
+				state = event.button;
+				oldX = event.clientX;
+				oldY = event.clientY;
+			}
+
+			function onMouseMove(event) {
+				event.preventDefault();
+				if(state == 1) {
+					dist = dist * (1 + (event.clientY - oldY)/60.0);
+				} else if(state == 0){
+					rY += (event.clientX - oldX)/5.0;
+					rX += (event.clientY - oldY)/5.0;
+				}
+				oldX = event.clientX;
+				oldY = event.clientY;
+				drawScene();
+			}
+
+			function onMouseUp( event ) {
+				event.preventDefault();
+				//console.log("Rx: "+rX+",Ry: "+rY);
+				state = -1;
+			}
+
+			function webGLStart() {
+				rX = 0;
+				rY = 0;
+				dist = -200;
+				oldX = 0;
+				oldY = 0;
+				state = -1;
+				D2R   = 0.0174532925199433;
+
+				f = document.getElementById("input");
+				var canvas = document.getElementById("canvas");
+				canvas.setAttribute('width', document.body.clientWidth);
+				canvas.setAttribute('height', document.body.clientHeight);
+				initGL(canvas);
+				initShaders(); 
+				initBuffers();
+
+				mat4.perspective(45, gl.viewportWidth / gl.viewportHeight, 0.1, 10000.0, pMatrix);
+
+				//attach mouse events
+				document.addEventListener( 'mousedown', onMouseDown, false );
+				document.addEventListener( 'mousemove', onMouseMove, false );
+				document.addEventListener( 'mouseup', onMouseUp, false );
+
+				gl.clearColor(0.5, 0.5, 1.0, 1.0);
+				gl.enable(gl.DEPTH_TEST);
+
+				drawScene();
+            }
+            function doIt() {
+                var reader = new FileReader();
+                reader.addEventListener('load', function(event) {
+                    
+                    for(var i=0;i<meshes.length;i++) {
+                        meshes[i].vertices.length = 0;
+                       // meshes[i].uvs.length = 0;
+                        meshes[i].flags.length = 0;
+                        meshes[i].indices.length = 0;
+                       // meshes[i].textureMaps.length = 0;
+                        
+                         //delete buffer objects 
+			            gl.deleteBuffer(meshes[i].posVBO); meshes[i].posVBO = undefined;
+				       // gl.deleteBuffer(meshes[i].uvVBO);  meshes[i].uvVBO = undefined;
+                        gl.deleteBuffer(meshes[i].indicesBO); meshes[i].indicesBO = undefined;
+                    }                   
+                    
+                    modelLoaded = false;
+			        byteArray.length = 0;
+			        meshes.length = 0;
+			        
+			       
+				
+                    //image.src = event.target.result;
+                    byteArray = new Uint8Array(reader.result);
+                    //console.log(byteArray.length);
+                    filename = f.files[0].name;
+                    loadModel();
+                    //initTexture(getPath(f.files[0].name));
+                }, false);
+
+                reader.readAsArrayBuffer(f.files[0]);
+
+            }
+		</script>
+	</head>
+	<body oncontextmenu="return false;" onload="webGLStart()" style="padding:0; margin:0">
+	     <input id="input" type="file" accept=".3ds;" onchange="doIt();"><br />
+		<canvas id="canvas"  style="border:none;" width="100%" height="100%"></canvas>
+	</body>
+</html>
